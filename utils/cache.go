@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"log"
 	"time"
 
@@ -25,8 +26,8 @@ func InitCache() {
 }
 
 // GetCacheKey 生成缓存键
-func GetCacheKey(uri string, token string) string {
-	hash := sha256.Sum256([]byte(uri + ":" + token))
+func GetCacheKey(uri string, token string, bodyHash string) string {
+	hash := sha256.Sum256([]byte(uri + ":" + token + ":" + bodyHash))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -47,13 +48,26 @@ func SetCachedResponse(key string, response string, ttl int) {
 // WithConditionalGet 修改后的函数
 func WithConditionalGet(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
+
+		var bodyBytes []byte
+		if c.Request.Body != nil {
+			bodyBytes, _ = c.GetRawData()
+			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // 恢复请求体
+		}
+
+		// 计算请求体的哈希值
+		bodyHash := ""
+		if len(bodyBytes) > 0 {
+			hash := sha256.Sum256(bodyBytes)
+			bodyHash = hex.EncodeToString(hash[:])
+		}
 		// 构造缓存键
 		rawURI := c.Request.URL.Path
 		token := c.Request.Header.Get("x-jike-access-token")
-		cacheKey := GetCacheKey(rawURI, token)
+		cacheKey := GetCacheKey(rawURI, token, bodyHash)
 
 		// 获取缓存值
-		cached, err := GetCachedResponse(cacheKey)
+		_, err := GetCachedResponse(cacheKey)
 
 		// 如果启用调试可记录日志
 		log.Printf("Cache Key: %s | Hit: %v", cacheKey, err == nil)
@@ -72,10 +86,6 @@ func WithConditionalGet(handler gin.HandlerFunc) gin.HandlerFunc {
 					log.Printf("Invalid Last-Modified format: %s", lastModified)
 				}
 			}
-
-			// 返回缓存的响应数据
-			c.Data(200, "application/json", []byte(cached))
-			return
 		}
 
 		// 缓存未命中，继续执行 handler 并捕获响应
@@ -88,8 +98,6 @@ func WithConditionalGet(handler gin.HandlerFunc) gin.HandlerFunc {
 
 		// 更新缓存
 		SetCachedResponse(cacheKey, responseBody, 5*60) // TTL 5分钟
-
-		// 不需要重写响应，因为已经由 writer 写出
 	}
 }
 
